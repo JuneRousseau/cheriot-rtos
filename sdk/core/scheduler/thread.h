@@ -72,6 +72,23 @@ namespace
 			return current;
 		}
 
+#ifdef CHERIOT_MALICIOUS_SCHEDULER
+		CHERI_SEALED(TrustedStack *) get_tstack() const
+		{
+			return tStackPtr;
+		}
+
+		// POC: make the given (already-exited) thread "current" again, so that
+		// when the replayed zombie faults and re-enters the exit path,
+		// Thread::schedule() treats it as a dead current thread instead of
+		// corrupting the idle thread's handle (which happens when current is
+		// null).
+		static void set_current(ThreadImpl *t)
+		{
+			current = t;
+		}
+#endif
+
 		/**
 		 * Run the scheduler to pick the next thread to run.  This returns a
 		 * sealed capability to the trusted stack of the new thread, ready to be

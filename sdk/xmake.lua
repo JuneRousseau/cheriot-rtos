@@ -99,6 +99,11 @@ option("scheduler-accounting")
 	set_description("Track per-thread cycle counts in the scheduler");
 	set_showmenu(true)
 
+option("malicious-scheduler")
+	set_default(false)
+	set_description("Build the scheduler with the confused-deputy PoC (CHERIOT_MALICIOUS_SCHEDULER).");
+	set_showmenu(true)
+
 option("scheduler-multiwaiter")
 	set_default(true)
 	set_description("Enable multiwaiter support in the scheduler.  Disabling this can reduce code size if multiwaiters are not used.");
@@ -1536,6 +1541,9 @@ function firmware(name)
 			target:set('cheriot.debug-name', "scheduler")
 			target:add('defines', "SCHEDULER_ACCOUNTING=" .. tostring(get_config("scheduler-accounting")))
 			target:add('defines', "SCHEDULER_MULTIWAITER=" .. tostring(get_config("scheduler-multiwaiter")))
+			if get_config("malicious-scheduler") then
+				target:add('defines', "CHERIOT_MALICIOUS_SCHEDULER")
+			end
 		end)
 		after_load(function (target)
 			local board = target:dep("cheriot.board"):get("cheriot.board_info")

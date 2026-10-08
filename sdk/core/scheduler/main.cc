@@ -73,6 +73,15 @@ static_assert(IsInterruptController<InterruptController>);
  */
 static uint64_t cyclesAtLastSchedulingEvent;
 
+#ifdef CHERIOT_MALICIOUS_SCHEDULER
+// We keep a pointer to the first exited ThreadImpl
+static Thread *firstExitedThread = nullptr;
+// Replay the first existed thread exactly once
+static bool firstExitedThreadHasReplayed = false;
+// Avoid corrupting the scheduler when the zombie re-enters the exit path
+static bool zombiePending = false;
+#endif
+
 namespace
 {
 	constexpr bool UseMultiwaiters = SCHEDULER_MULTIWAITER;
@@ -427,21 +436,56 @@ namespace
 			tick = schedNeeded;
 			break;
 		case MCAUSE_THREAD_EXIT:
-			// Make the current thread non-runnable.
-			if (Thread::exit())
+		{
+#ifdef CHERIOT_MALICIOUS_SCHEDULER
+			// Avoid re-re-entering when the zombie thread re-enters the exit path
+			if (zombiePending)
 			{
-#ifdef SIMULATION
+				zombiePending = false;
+				schedNeeded          = true;
+				tick                 = true;
+				sealedTStack         = nullptr;
+				break;
+			}
+#endif
+			// Make the current thread non-runnable.
+			bool lastThread = Thread::exit();
+#ifdef CHERIOT_MALICIOUS_SCHEDULER
+			// Keep a handle on the first thread to exit and store the handle still alive
+			// to be able to replay it later.
+			if (!firstExitedThreadHasReplayed && firstExitedThread == nullptr)
+			{
+				firstExitedThread = Thread::current_get();
+			}
+			// A replay is pending once we have kept an exited thread and have not yet replayed it.
+			bool replayPending = (firstExitedThread != nullptr) && !firstExitedThreadHasReplayed;
+			// Don't exit if a replay is pending
+			if (lastThread && !replayPending)
+			{
+#	ifdef SIMULATION
+				platform_simulation_exit(0);
+#	endif
+			}
+			schedNeeded = true;
+			tick        = true;
+			// sealedTStack is intentionally left non-null here.
+#else
+			if (lastThread)
+			{
+#	ifdef SIMULATION
 				// If we have no threads left (not counting the idle
 				// thread), exit.
 				platform_simulation_exit(0);
-#endif
+#	endif
 			}
 			// We cannot continue exiting this thread, make sure we will
 			// pick a new one.
 			schedNeeded  = true;
 			tick         = true;
 			sealedTStack = nullptr;
+#endif
 			break;
+		}
 		default:
 			sched_panic(mcause, mepc, mtval);
 	}
@@ -451,6 +495,18 @@ namespace
 	}
 	auto newContext =
 	  schedNeeded ? Thread::schedule(sealedTStack) : sealedTStack;
+#ifdef CHERIOT_MALICIOUS_SCHEDULER
+	// When no thread is ready to run, malicious scheduler replays the first existed threads 
+	if (!Thread::any_ready() && !firstExitedThreadHasReplayed && firstExitedThread != nullptr)
+	{
+		newContext = firstExitedThread->get_tstack();
+		// Restore the exited thread as "current" so the zombie's eventual
+		// re-exit does not corrupt the idle thread's sealed handle.
+		Thread::set_current(firstExitedThread);
+		firstExitedThreadHasReplayed       = true;
+		zombiePending = true;
+	}
+#endif
 #if 0
 	Debug::log("Thread: {}",
 				Thread::current_get() ? Thread::current_get()->id_get() : 0);
