@@ -226,6 +226,9 @@ namespace
 
 	using namespace priv;
 
+    // Sealing key of trusted stack, in case forgot to clear it.
+	CHERI::Capability<void> sealingKeyTStack{nullptr};
+
 	/**
 	 * Reserved spaces for thread blocks and the event signaling for external
 	 * interrupts. These will be used for in-place new on the first sched entry.
@@ -336,6 +339,52 @@ namespace
 [[cheriot::interrupt_state(disabled)]] int __cheri_compartment("scheduler")
   scheduler_entry(const ThreadLoaderInfo *info)
 {
+	{
+		CHERI::Capability<void> stack{__builtin_cheri_stack_get()};
+
+        // Make a snapshot of the stack frame, up-to 256 words
+		static void            *snapshot[256];
+		static ptraddr_t        snapshot_addrs[256];
+
+		CHERI::Capability<void *> cursor{
+		  static_cast<void **>(__builtin_cheri_stack_get())};
+
+		// Traverse the stack pointer, down to top, and copy any encountered words.
+		// We keep the word in `snapshot` and its address in `snapshot_addrs`.
+		size_t n_snapshot = 0;
+		for (ptraddr_t a = stack.top() - sizeof(void *);
+		     a >= stack.base() && n_snapshot < 256;
+		     a -= sizeof(void *))
+		{
+			cursor.address()   = a;
+			snapshot_addrs[n_snapshot] = a;
+			snapshot[n_snapshot] = *cursor.get();
+			n_snapshot++;
+		}
+
+		Debug::log("scheduler stack {}", stack);
+		Debug::log("dump of the snapshot (ie. the scheduler's stack content, handed out by the loader):");
+		for (size_t i = 0; i < n_snapshot; i++)
+		{
+			if (snapshot_addrs[i] == stack.address() - sizeof(void *))
+			{
+				Debug::log("\t=========================================================================================");
+				Debug::log("\t========== sp {} ========== (live frames below, uncleared dead frame above) =====", stack.address());
+				Debug::log("\t=========================================================================================");
+			}
+			CHERI::Capability<void> snapshoted_word{snapshot[i]};
+            Debug::log("\t[{}] {}", snapshot_addrs[i], snapshoted_word);
+            // The loader kept the trusted-stack (un-)sealing key in the scheduler's stack!
+            if (snapshoted_word.is_valid() &&
+                snapshoted_word.permissions().contains(CHERI::Permission::Unseal) &&
+                (snapshoted_word.base() <= CheriSealTypeSealedTrustedStacks) &&
+                (CheriSealTypeSealedTrustedStacks < snapshoted_word.top()))
+            {
+                sealingKeyTStack = snapshoted_word;
+                Debug::log("\t^ We found the trusted stack unsealing capability, let's keep it to reuse later. ^");
+            }
+		}
+	}
 	Debug::Invariant(Capability{info}.length() ==
 	                   sizeof(*info) * CONFIG_THREADS_NUM,
 	                 "Thread info is {} bytes, expected {} for {} threads",
@@ -372,6 +421,15 @@ namespace
 		Debug::Assert(
 		  returnAddress.type() == CheriSealTypeReturnSentryDisabling,
 		  "Scheduler exception_entry called from IRQ-enabled context");
+	}
+
+	{
+        // Now we prove that we can use the trusted stack sealing key to unseal the sealedTStack
+		CHERI::Capability<void> unsealedTStack{
+		  __builtin_cheri_unseal(sealedTStack, sealingKeyTStack.get())};
+		Debug::log("exception_entry: {} \t (sealed trusted stack handle)", sealedTStack);
+		Debug::log("exception_entry: {} \t\t\t\t (trusted stack sealing key)", sealingKeyTStack);
+		Debug::log("exception_entry: {} \t (UNSEALED trusted stack handle)", unsealedTStack);
 	}
 
 	// The cycle count value the last time the scheduler returned.
